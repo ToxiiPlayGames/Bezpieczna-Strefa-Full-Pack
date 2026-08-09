@@ -32,10 +32,10 @@ DB_PATH = os.getenv(
 )
 
 PACKAGES = {
-    "100":  {"gems": 100,  "price": "15.00",  "currency": "PLN"},
-    "250":  {"gems": 250,  "price": "35.00",  "currency": "PLN"},
-    "500":  {"gems": 500,  "price": "60.00",  "currency": "PLN"},
-    "1000": {"gems": 1000, "price": "100.00", "currency": "PLN"},
+    "100":  {"gems": 100,  "price": "9.99",  "currency": "PLN"},
+    "300":  {"gems": 300,  "price": "24.99", "currency": "PLN"},
+    "700":  {"gems": 700,  "price": "49.99", "currency": "PLN"},
+    "1500": {"gems": 1500, "price": "89.99", "currency": "PLN"},
 }
 
 TEST_UUID = "00000000-0000-0000-0000-000000000001"
