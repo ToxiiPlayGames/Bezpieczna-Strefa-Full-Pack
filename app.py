@@ -1,5 +1,6 @@
 import os
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 import uuid
 from datetime import datetime, timezone
 from html import escape
@@ -26,10 +27,7 @@ PAYPAL_BASE = (
     else "https://api-m.paypal.com"
 )
 
-DB_PATH = os.getenv(
-    "PREMIUM_DB_PATH",
-    "/tmp/bezpiecznastrefa-premium.sqlite3"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 PACKAGES = {
     "100":  {"gems": 100,  "price": "9.99",  "currency": "PLN"},
@@ -42,19 +40,26 @@ TEST_UUID = "00000000-0000-0000-0000-000000000001"
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS grants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            capture_id TEXT UNIQUE NOT NULL,
-            player_uuid TEXT NOT NULL,
-            package_id TEXT NOT NULL,
-            gems INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            claimed_at TEXT
-        )
-    """)
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
+
+    conn = psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+        connect_timeout=15,
+    )
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS grants (
+                id BIGSERIAL PRIMARY KEY,
+                capture_id TEXT UNIQUE NOT NULL,
+                player_uuid TEXT NOT NULL,
+                package_id TEXT NOT NULL,
+                gems BIGINT NOT NULL,
+                created_at TEXT NOT NULL,
+                claimed_at TEXT
+            )
+        """)
     conn.commit()
     return conn
 
@@ -183,20 +188,22 @@ def insert_grant_from_capture(capture: dict):
 
     conn = get_db()
     try:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO grants
-            (capture_id, player_uuid, package_id, gems, created_at, claimed_at)
-            VALUES (?, ?, ?, ?, ?, NULL)
-            """,
-            (
-                capture_id,
-                player_uuid,
-                package_id,
-                package["gems"],
-                now(),
-            ),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO grants
+                (capture_id, player_uuid, package_id, gems, created_at, claimed_at)
+                VALUES (%s, %s, %s, %s, %s, NULL)
+                ON CONFLICT (capture_id) DO NOTHING
+                """,
+                (
+                    capture_id,
+                    player_uuid,
+                    package_id,
+                    package["gems"],
+                    now(),
+                ),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -262,7 +269,17 @@ def home():
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True})
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        finally:
+            conn.close()
+        return jsonify({"ok": True, "database": "neon-postgres"})
+    except Exception as e:
+        return jsonify({"ok": False, "database": "error", "details": str(e)}), 503
 
 
 @app.get("/api/packages")
@@ -450,16 +467,18 @@ def grants(player_uuid):
 
     conn = get_db()
     try:
-        rows = conn.execute(
-            """
-            SELECT id, capture_id, package_id, gems, created_at
-            FROM grants
-            WHERE player_uuid = ? AND claimed_at IS NULL
-            ORDER BY id
-            """,
-            (player_uuid,),
-        ).fetchall()
-        return jsonify([dict(r) for r in rows])
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, capture_id, package_id, gems, created_at
+                FROM grants
+                WHERE player_uuid = %s AND claimed_at IS NULL
+                ORDER BY id
+                """,
+                (player_uuid,),
+            )
+            rows = cur.fetchall()
+        return jsonify(rows)
     finally:
         conn.close()
 
@@ -472,17 +491,19 @@ def claim(grant_id):
 
     conn = get_db()
     try:
-        cur = conn.execute(
-            """
-            UPDATE grants
-            SET claimed_at = ?
-            WHERE id = ? AND claimed_at IS NULL
-            """,
-            (now(), grant_id),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE grants
+                SET claimed_at = %s
+                WHERE id = %s AND claimed_at IS NULL
+                """,
+                (now(), grant_id),
+            )
+            changed = cur.rowcount
         conn.commit()
 
-        if cur.rowcount == 0:
+        if changed == 0:
             return jsonify({
                 "error": "grant not found or already claimed",
             }), 404
